@@ -5,6 +5,7 @@ from gym.utils import seeding
 import numpy as np
 
 import itertools
+from operator import attrgetter
 
 class GridWorld(gym.Env):
     metadata = {'render.modes': ['human']}
@@ -521,7 +522,8 @@ class HuntersAndGatherers(gym.Env):
 class Other():
 
     # TODO: make sure agents don't act when hp < 0
-    def __init__(self, max_hp):
+    def __init__(self, max_hp, id=None):
+        self._id = id
         self._hp = max_hp
         self._max_hp = max_hp
         self._loc = None
@@ -533,6 +535,14 @@ class Other():
     @property
     def hp(self):
         return self._hp
+
+    @property
+    def id(self):
+        return self._id
+
+    @id.setter
+    def id(self, val):
+        self._id = val
 
     @hp.setter
     def hp(self, val):
@@ -563,13 +573,11 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
         self._loc = None
         self._hp = 10
         self._t = 0
-        self._max_t = 100
         self._plants = None
-        self._others = [Other(10)]
+        self._others = []
         self.vegetation_t_minus1 = None
         self.vegetation_t_minus2 = None
         self.vegetation_t = None
-        self.entity_perms = None
 
         self.action_space = spaces.Discrete(6)
         self.observation_space = spaces.Tuple([spaces.Box(low=-10, high=5, shape=(9,)),
@@ -582,8 +590,16 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
         return self._loc
 
     @property
+    def t(self):
+        return self._t
+
+    @property
     def hp(self):
         return self._hp
+
+    @property
+    def others(self):
+        return self._others
 
     @property
     def id(self):
@@ -593,6 +609,10 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
     def hp(self, val):
         self._hp = val
 
+    @others.setter
+    def others(self, val):
+        self._others = val
+
     @id.setter
     def id(self, val):
         self._id = val
@@ -600,9 +620,6 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
     @property
     def plants(self):
         return self._plants
-    
-    def set_entity_perms(self, i):
-        self.entity_perms = itertools.permutations([*self._others[0:i], self, *self._others[i:]])
 
     def step(self, actions):
         #Actions: 0=U, 1=R, 2=D, 3=L, 4=Attack, 5=Share
@@ -616,13 +633,14 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
         # TODO: make sure it's kosher to do this before the agent actions are taken
         # self.step_vegetation()
         self._plants = actions[3]
+        self._others = [other for other in self._others if other.hp > 0]
 
         # TODO: how to handle dead agents?
         self.move(actions)
         self.interact(actions)
         self.forage()
 
-        if self._hp <= 0 or self._t == self._max_t \
+        if self._hp <= 0 \
                 or self._loc[0] not in self._xy_bounds[0]\
                 or self._loc[1] not in self._xy_bounds[1]:
             reward = 0
@@ -639,15 +657,20 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
                 others),\
                reward, done, {}
 
-    def reset(self, plants):
-        # TODO: reset foes and friends (hp, loc, etc.)
-        self._loc = list(np.random.randint(7, size=2)) # hard-coded for now
+    def reset(self, plants=None, id=None):
+        if not id:
+            self._loc = list(np.random.randint(7, size=2)) # hard-coded for now
+        else:
+            original_other = Other(10, self._id)
+            original_other.hp = self._hp
+            original_other.loc = self._loc
+            # I think the order here is no longer important:
+            self._others = [*self._others[0:self._id], original_other, *self._others[self._id:]]
+            self._id = id
         self._t = 0
         self._hp = 10
-        for other in self._others:
-            other.reset()
-        # n = np.random.randint(2,9)
-        self._plants = plants
+        if plants:
+            self._plants = plants
         self.vegetation_t_minus1 = self.get_vegetation_view()
         self.vegetation_t_minus2 = self.get_vegetation_view()
         self.vegetation_t = self.get_vegetation_view()
@@ -656,9 +679,12 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
                 self.vegetation_t_minus2,
                 self.get_other_view())
 
-    def add_others_locs(self, locs):
-        for loc, other in list(zip(locs, self._others)):
+    def add_others(self, locs, ids):
+        for loc, id in list(zip(locs, ids)):
+            other = Other(10)
             other.loc = loc
+            other.id = id
+            self._others.append(other)
 
     def move(self, actions):
         actions = actions[0]
@@ -680,6 +706,9 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
                     other.loc[1] -= 1
                 if action == 3:
                     other.loc[0] -= 1
+            if other.loc[0] not in self._xy_bounds[0]\
+                or other.loc[1] not in self._xy_bounds[1]:
+                other.hp = 0
 
 
     def interact(self, actions):
@@ -692,7 +721,10 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
             for dx in list(itertools.permutations([- 1, 0, 1]))[permutations[0][1]]:
                 loc = [self._loc[0] + dx, self._loc[1] + dy]
                 try:
-                    other = next(f for f in self._others if f.loc == loc and f.hp > 0)
+                    entity_list = sorted([*self._others, self], key=attrgetter('id'))
+                    entity_perm = next(p for i, p in enumerate(itertools.permutations(entity_list))
+                                       if i == entity_perm)
+                    other = next(f for f in entity_perm if f.loc == loc and f.hp > 0 and f != self)
                     break_again = True
                     break
                 except StopIteration:
@@ -716,13 +748,15 @@ class HuntersAndGatherersMultiPlayer(gym.Env):
             if other.hp > 0:
                 for dy in list(itertools.permutations([- 1, 0, 1]))[perm[0]]:
                     for dx in list(itertools.permutations([- 1, 0, 1]))[perm[1]]:
-                        loc = [other.loc[0] + dx, other.loc[1] + dy]
                         try:
-                            entity_list = next(p for i, p in enumerate(itertools.permutations([*self._others[0:self._id],
-                                                                                               self,
-                                                                                               *self._others[self._id:]]
-                                                                                              )) if i == entity_perm)
-                            alter = next(f for f in entity_list if f.loc == loc and f != other and f.hp > 0)
+                            loc = [other.loc[0] + dx, other.loc[1] + dy]
+                        except TypeError:
+                            print('error')
+                        try:
+                            entity_list = sorted([*self._others, self], key=attrgetter('id'))
+                            entity_perm = next(p for i, p in enumerate(itertools.permutations(entity_list))
+                                               if i == entity_perm)
+                            alter = next(f for f in entity_perm if f.loc == loc and f != other and f.hp > 0)
                             break_again = True
                             break
                         except StopIteration:
